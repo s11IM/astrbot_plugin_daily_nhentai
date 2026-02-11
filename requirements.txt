@@ -1,0 +1,8 @@
+cloudscraper
+beautifulsoup4
+aiohttp
+ultralytics
+opencv-python
+Pillow
+transformers
+torch

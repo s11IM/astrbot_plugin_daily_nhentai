@@ -1,0 +1,6 @@
+plugin_id: astrbot_plugin_daily_nhentai
+name: "NHentai 每日流行"
+description: "获取 NHentai 每日流行榜单，通过本地 YOLO NSFW 模型筛选高质量本子"
+author: "s11IM"
+version: "1.5.0"
+url: "https://github.com/s11IM/astrbot_plugin_daily_nhentai"

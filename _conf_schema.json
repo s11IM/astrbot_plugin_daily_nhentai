@@ -1,0 +1,37 @@
+{
+    "proxy_url": {
+        "description": "代理地址",
+        "type": "string",
+        "default": "",
+        "hint": "例如 http://127.0.0.1:7890。一般默认留空使用系统代理。"
+    },
+    "model_threshold": {
+        "description": "模型检测阈值",
+        "type": "float",
+        "default": 0.08,
+        "slider": {
+            "min": 0.01,
+            "max": 1.0,
+            "step": 0.01
+        },
+        "hint": "0.01 - 1.0。越低越敏感，越高越准确。"
+    },
+    "model_device": {
+        "description": "推理设备",
+        "type": "string",
+        "default": "",
+        "options": ["", "cuda", "cpu"],
+        "hint": "留空自动选择。cuda 为显卡，cpu 为处理器。"
+    },
+    "min_pages": {
+        "description": "每日热门：最少页数过滤",
+        "type": "int",
+        "default": 35,
+        "slider": {
+            "min": 0,
+            "max": 100,
+            "step": 1
+        },
+        "hint": "每日热门榜单中，过滤掉少于此页数的本子。默认 35 页。"
+    }
+}
