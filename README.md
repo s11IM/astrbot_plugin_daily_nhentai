@@ -1,4 +1,4 @@
-# AstrBot NHentai Daily Plugin
+# AstrBot NHentai Daily
 
 这个插件会每日自动（或通过命令）获取 nhentai 的中文热门本子，并使用本地 YOLO NSFW 模型进行质量筛选。
 
@@ -55,3 +55,4 @@ Bot 将自动爬取 nhentai 中文热门列表，进行下载和 AI 分析，最
 ```
 例如：`/nh 123456`
 Bot 将针对指定的本子 ID 进行下载和 AI 分析，并生成单张评分卡片。
+
