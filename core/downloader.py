@@ -4,7 +4,7 @@ import asyncio
 from astrbot.api import logger
 
 class ImageDownloader:
-    def __init__(self, max_concurrency=10, proxy=None):
+    def __init__(self, max_concurrency=20, proxy=None):
         self.semaphore = asyncio.Semaphore(max_concurrency)
         self.proxy = proxy
         # 如果未传入，尝试从环境变量读取
@@ -21,7 +21,7 @@ class ImageDownloader:
         with open(path, 'wb') as f:
             f.write(content)
 
-    async def download_image(self, session, url, save_path, retries=3):
+    async def download_image(self, session, url, save_path, retries=2):
         async with self.semaphore:
             for i in range(retries):
                 try:
@@ -53,16 +53,34 @@ class ImageDownloader:
         
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-            "Referer": "https://nhentai.net/"
+            "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Referer": "https://nhentai.net/",
+            "Sec-Fetch-Dest": "image",
+            "Sec-Fetch-Mode": "no-cors",
+            "Sec-Fetch-Site": "same-site"
         }
 
         async with aiohttp.ClientSession(headers=headers) as session:
             tasks = []
+            items = []
             for url in urls:
                 # 从 URL 中提取文件名 (例如 1.jpg)
                 filename = url.split('/')[-1]
                 save_path = os.path.join(output_dir, filename)
                 task = asyncio.create_task(self.download_image(session, url, save_path))
                 tasks.append(task)
+                items.append((url, save_path))
             
-            await asyncio.gather(*tasks)
+            results = await asyncio.gather(*tasks)
+
+        failed = [
+            {"url": url, "path": save_path}
+            for (url, save_path), ok in zip(items, results)
+            if not ok
+        ]
+        return {
+            "total": len(urls),
+            "success": len(urls) - len(failed),
+            "failed": failed
+        }

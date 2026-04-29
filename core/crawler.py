@@ -4,6 +4,7 @@ from bs4 import BeautifulSoup
 import re
 import json
 import asyncio
+from urllib.parse import urlparse
 from astrbot.api import logger
 
 class NHCrawler:
@@ -30,6 +31,20 @@ class NHCrawler:
             print(f"Crawler 使用代理: {proxy}")
         else:
             print("Crawler 未配置代理，将尝试直连。")
+
+    def _full_image_ext_from_thumb(self, thumb_src):
+        """Extract the original page extension from a thumbnail URL."""
+        filename = os.path.basename(urlparse(thumb_src).path)
+        match = re.search(r'\d+t\.(jpg|jpeg|png|webp|gif)(?:\.[a-z0-9]+)?$', filename, re.IGNORECASE)
+        if match:
+            ext = match.group(1).lower()
+            return '.jpg' if ext == 'jpeg' else f'.{ext}'
+
+        lower_src = thumb_src.lower()
+        for ext in ('.jpg', '.jpeg', '.png', '.gif', '.webp'):
+            if ext in lower_src:
+                return '.jpg' if ext == '.jpeg' else ext
+        return '.jpg'
 
     async def get_popular_today(self, timeout=30):
         """获取今日热门列表
@@ -63,6 +78,7 @@ class NHCrawler:
                 if resp.status_code != 200:
                     return []
 
+            resp.encoding = 'utf-8'
             soup = BeautifulSoup(resp.text, 'html.parser')
 
             # nhentai 的热门列表通常在 class="index-container index-popular" 中
@@ -217,10 +233,7 @@ class NHCrawler:
             img_tag = thumb.find('img')
             thumb_src = img_tag.get('data-src') or img_tag.get('src')
 
-            ext = '.jpg'
-            if '.webp' in thumb_src: ext = '.webp'
-            elif '.png' in thumb_src: ext = '.png'
-            elif '.gif' in thumb_src: ext = '.gif'
+            ext = self._full_image_ext_from_thumb(thumb_src)
 
             real_url = f"https://i.nhentai.net/galleries/{media_id}/{i}{ext}"
             image_urls.append(real_url)

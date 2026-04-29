@@ -2,6 +2,9 @@ import os
 import shutil
 import asyncio
 import threading
+import time
+import uuid
+from PIL import Image as PILImage
 from astrbot.api import logger
 from .crawler import NHCrawler
 from .downloader import ImageDownloader
@@ -9,6 +12,8 @@ from .analyzer import NSFWAnalyzer
 from .renderer import ResultRenderer
 
 class DailyManager:
+    DAILY_RESULT_CACHE_TTL = 15 * 60
+
     def __init__(self, context, config):
         self.context = context
         self.config = config
@@ -50,6 +55,108 @@ class DailyManager:
         except Exception as e:
             logger.warning(f"缓存清理失败: {e}")
 
+    def get_recent_daily_result(self, max_age_seconds=None):
+        if max_age_seconds is None:
+            max_age_seconds = self.DAILY_RESULT_CACHE_TTL
+
+        base_dir = os.path.dirname(os.path.dirname(__file__))
+        result_path = os.path.join(base_dir, "cache", "nh_daily_result.jpg")
+
+        try:
+            if not os.path.exists(result_path) or os.path.getsize(result_path) <= 0:
+                return None
+
+            age_seconds = time.time() - os.path.getmtime(result_path)
+            if age_seconds <= max_age_seconds:
+                logger.info(f"命中每日总览缓存，直接复用: {result_path} ({int(age_seconds)}秒前生成)")
+                return result_path
+        except Exception as e:
+            logger.debug(f"检查每日总览缓存失败: {e}")
+
+        return None
+
+    def _cleanup_send_variants(self, cache_dir, max_age_seconds=60 * 60):
+        try:
+            now = time.time()
+            for filename in os.listdir(cache_dir):
+                if not filename.startswith("nh_daily_result_send_") or not filename.endswith(".jpg"):
+                    continue
+
+                path = os.path.join(cache_dir, filename)
+                if now - os.path.getmtime(path) > max_age_seconds:
+                    os.remove(path)
+        except Exception as e:
+            logger.debug(f"清理发送扰动副本失败: {e}")
+
+    def prepare_image_for_send(self, image_path):
+        """Create a visually-identical send copy with a different content hash."""
+        if not image_path or not os.path.exists(image_path):
+            return image_path
+
+        try:
+            cache_dir = os.path.dirname(image_path)
+            self._cleanup_send_variants(cache_dir)
+
+            nonce = uuid.uuid4().hex
+            output_path = os.path.join(
+                cache_dir,
+                f"nh_daily_result_send_{int(time.time())}_{nonce[:8]}.jpg"
+            )
+
+            with PILImage.open(image_path) as img:
+                img = img.convert("RGB")
+                if img.width > 0 and img.height > 0:
+                    x, y = img.width - 1, img.height - 1
+                    r, g, b = img.getpixel((x, y))
+                    marker = int(nonce[:6], 16)
+                    img.putpixel((
+                        x,
+                        y
+                    ), (
+                        (r + 1 + marker % 3) % 256,
+                        (g + 1 + (marker // 3) % 3) % 256,
+                        (b + 1 + (marker // 9) % 3) % 256
+                    ))
+
+                img.save(output_path, quality=95, comment=f"send-{nonce}".encode("ascii"))
+
+            logger.info(f"已生成图片发送扰动副本: {output_path}")
+            return output_path
+        except Exception as e:
+            logger.warning(f"生成图片发送扰动副本失败，改用原图: {e}")
+            return image_path
+
+    def _downloaded_image_count(self, image_urls, gallery_dir):
+        count = 0
+        for url in image_urls:
+            filename = url.split('/')[-1]
+            image_path = os.path.join(gallery_dir, filename)
+            if os.path.exists(image_path) and os.path.getsize(image_path) > 0:
+                count += 1
+        return count
+
+    def _has_cover_image(self, gallery_dir):
+        for ext in ['jpg', 'png', 'webp', 'gif']:
+            cover_path = os.path.join(gallery_dir, f"1.{ext}")
+            if os.path.exists(cover_path) and os.path.getsize(cover_path) > 0:
+                return True
+        return False
+
+    async def _rescue_cover_image(self, gid, image_urls, gallery_dir):
+        if not image_urls or self._has_cover_image(gallery_dir):
+            return False
+
+        cover_url = image_urls[0]
+        logger.warning(f"[下载] {gid} 封面图缺失，尝试重新打捞: {cover_url}")
+        await self.downloader.download_images([cover_url], gallery_dir)
+
+        if self._has_cover_image(gallery_dir):
+            logger.info(f"[下载] {gid} 封面图重新打捞成功")
+            return True
+
+        logger.warning(f"[下载] {gid} 封面图重新打捞失败")
+        return False
+
     async def process_daily_ranking(self, total_timeout=1200, analyze_timeout=300):
         """处理每日热门排行榜
 
@@ -64,11 +171,19 @@ class DailyManager:
             asyncio.TimeoutError: 整体流程超时
             Exception: 其他错误
         """
+        cached_result = self.get_recent_daily_result()
+        if cached_result:
+            return cached_result
+
         if self._lock.locked():
             raise Exception("已有任务正在进行中，请稍后再试")
 
         async with self._lock:
             try:
+                cached_result = self.get_recent_daily_result()
+                if cached_result:
+                    return cached_result
+
                 # 使用整体超时控制
                 return await asyncio.wait_for(
                     self._process_daily_ranking_internal(analyze_timeout),
@@ -128,7 +243,7 @@ class DailyManager:
                     
                     is_filtered = False
                     
-                    for retry in range(3): # 尝试 3 次
+                    for retry in range(2): # 尝试 2 次
                         try:
                             result = await self.crawler.get_gallery_images(gid, timeout=30, min_pages=self.min_pages)
                             if result is None:
@@ -140,19 +255,17 @@ class DailyManager:
                             if image_urls:
                                 break
                         except Exception as e:
-                            logger.debug(f"[下载] {gid} 获取链接出错: {e}，重试 {retry+1}/3...")
-                            if retry < 2:
+                            logger.debug(f"[下载] {gid} 获取链接出错: {e}，重试 {retry+1}/2...")
+                            if retry < 1:
                                 await asyncio.sleep(2)
 
                     if is_filtered:
                         skipped_galleries.append(gid)
-                        download_queue.task_done()
                         continue
 
                     if not image_urls:
-                        logger.warning(f"[下载] 无法获取 {gid} 的图片链接 (已重试3次)")
+                        logger.warning(f"[下载] 无法获取 {gid} 的图片链接 (已重试2次)")
                         failed_galleries.append(gid)
-                        download_queue.task_done()
                         continue
                     
                     # 更新元数据（如 tags）
@@ -161,11 +274,13 @@ class DailyManager:
 
                     # 下载图片
                     await self.downloader.download_images(image_urls, gallery_dir)
+                    await self._rescue_cover_image(gid, image_urls, gallery_dir)
+                    downloaded_count = self._downloaded_image_count(image_urls, gallery_dir)
 
                     # 放入分析队列
                     gallery['gallery_dir'] = gallery_dir
                     await analyze_queue.put(gallery)
-                    logger.info(f"[下载完成] {gid} ({len(image_urls)}页) - 已加入分析队列")
+                    logger.info(f"[下载完成] {gid} ({downloaded_count}/{len(image_urls)}) - 已加入分析队列")
 
                 except asyncio.TimeoutError:
                     logger.warning(f"[下载] 处理 {gid} 超时")
@@ -201,7 +316,7 @@ class DailyManager:
 
                     # 提取封面 (支持多种格式)
                     cover_found = False
-                    for ext in ['jpg', 'png', 'webp']:
+                    for ext in ['jpg', 'png', 'webp', 'gif']:
                         cover_path = os.path.join(gallery_dir, f"1.{ext}")
                         if os.path.exists(cover_path):
                              saved_cover = os.path.join(cache_dir, f"cover_{gid}.{ext}")
@@ -310,19 +425,19 @@ class DailyManager:
         try:
             # 1. 获取信息 (带重试)
             result = None
-            for retry in range(3):
+            for retry in range(2):
                 try:
                     # 单本子指定分析，不应进行页数过滤，传入 min_pages=0
                     result = await self.crawler.get_gallery_images(gid, min_pages=0)
                     if result:
                         break
                 except Exception as e:
-                    logger.debug(f"获取本子信息失败 {gid}: {e} (重试 {retry+1}/3)")
-                    if retry < 2:
+                    logger.debug(f"获取本子信息失败 {gid}: {e} (重试 {retry+1}/2)")
+                    if retry < 1:
                         await asyncio.sleep(2)
             
             if not result:
-                logger.warning(f"无法获取本子信息 {gid} (已重试3次)")
+                logger.warning(f"无法获取本子信息 {gid} (已重试2次)")
                 return None
                 
             image_urls, metadata = result
@@ -337,6 +452,9 @@ class DailyManager:
             
             # 2. 下载图片
             await self.downloader.download_images(image_urls, gallery_dir)
+            await self._rescue_cover_image(gid, image_urls, gallery_dir)
+            downloaded_count = self._downloaded_image_count(image_urls, gallery_dir)
+            logger.info(f"[下载完成] {gid} ({downloaded_count}/{len(image_urls)}) - 开始分析")
             
             # 3. 分析
             stop_event = threading.Event()
@@ -346,7 +464,7 @@ class DailyManager:
             
             # 4. 提取封面
             cover_found = False
-            for ext in ['jpg', 'png', 'webp']:
+            for ext in ['jpg', 'png', 'webp', 'gif']:
                 cover_path = os.path.join(gallery_dir, f"1.{ext}")
                 if os.path.exists(cover_path):
                      saved_cover = os.path.join(cache_dir, f"cover_{gid}.{ext}")
