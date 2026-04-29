@@ -24,16 +24,26 @@ class DailyNHentaiPlugin(Star):
         
         if not cmd or cmd == "today":
             # === 今日热门逻辑 ===
-            yield event.plain_result("正在获取今日热门的25个本子，请稍候...这可能需要几分钟甚至更久。")
             try:
+                cached_result = self.manager.get_recent_daily_result()
+                if cached_result:
+                    send_path = self.manager.prepare_image_for_send(cached_result)
+                    yield event.chain_result([
+                        Image.fromFileSystem(send_path)
+                    ])
+                    return
+
+                yield event.plain_result("正在获取今日热门的25个本子，请稍候...这可能需要几分钟甚至更久。")
+
                 # 调用处理函数，设置整体超时20分钟，单本子分析5分钟
                 result_card = await self.manager.process_daily_ranking(
                     total_timeout=1200,  # 20分钟整体超时
                     analyze_timeout=300  # 5分钟单本子分析超时
                 )
                 if result_card:
+                    send_path = self.manager.prepare_image_for_send(result_card)
                     yield event.chain_result([
-                        Image.fromFileSystem(result_card)
+                        Image.fromFileSystem(send_path)
                     ])
                 else:
                     yield event.plain_result("未能生成推荐结果，可能是网络问题或暂无数据，请检查日志或稍后再试。")
@@ -51,8 +61,9 @@ class DailyNHentaiPlugin(Star):
                 result_card = await self.manager.process_single_gallery(gid)
                 
                 if result_card:
+                    send_path = self.manager.prepare_image_for_send(result_card)
                     yield event.chain_result([
-                        Image.fromFileSystem(result_card)
+                        Image.fromFileSystem(send_path)
                     ])
                 else:
                     yield event.plain_result(f"任务失败：请检查日志")
