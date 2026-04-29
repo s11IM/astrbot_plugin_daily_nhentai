@@ -135,6 +135,15 @@ class DailyManager:
                 count += 1
         return count
 
+    def _missing_image_urls(self, image_urls, gallery_dir):
+        missing_urls = []
+        for url in image_urls:
+            filename = url.split('/')[-1]
+            image_path = os.path.join(gallery_dir, filename)
+            if not os.path.exists(image_path) or os.path.getsize(image_path) <= 0:
+                missing_urls.append(url)
+        return missing_urls
+
     def _has_cover_image(self, gallery_dir):
         for ext in ['jpg', 'png', 'webp', 'gif']:
             cover_path = os.path.join(gallery_dir, f"1.{ext}")
@@ -156,6 +165,23 @@ class DailyManager:
 
         logger.warning(f"[下载] {gid} 封面图重新打捞失败")
         return False
+
+    async def _rescue_missing_images(self, gid, image_urls, gallery_dir):
+        missing_urls = self._missing_image_urls(image_urls, gallery_dir)
+        if not missing_urls:
+            return 0
+
+        logger.warning(f"[下载] {gid} 缺失 {len(missing_urls)} 张图片，开始低并发补救")
+        await asyncio.sleep(3)
+        rescue_downloader = ImageDownloader(max_concurrency=3, proxy=self.downloader.proxy)
+        await rescue_downloader.download_images(missing_urls, gallery_dir)
+
+        remaining = self._missing_image_urls(image_urls, gallery_dir)
+        rescued_count = len(missing_urls) - len(remaining)
+        logger.info(f"[下载] {gid} 缺页补救完成: 成功补回 {rescued_count}/{len(missing_urls)}")
+        if remaining:
+            logger.warning(f"[下载] {gid} 仍缺失 {len(remaining)} 张图片")
+        return rescued_count
 
     async def process_daily_ranking(self, total_timeout=1200, analyze_timeout=300):
         """处理每日热门排行榜
@@ -275,6 +301,7 @@ class DailyManager:
                     # 下载图片
                     await self.downloader.download_images(image_urls, gallery_dir)
                     await self._rescue_cover_image(gid, image_urls, gallery_dir)
+                    await self._rescue_missing_images(gid, image_urls, gallery_dir)
                     downloaded_count = self._downloaded_image_count(image_urls, gallery_dir)
 
                     # 放入分析队列
@@ -453,6 +480,7 @@ class DailyManager:
             # 2. 下载图片
             await self.downloader.download_images(image_urls, gallery_dir)
             await self._rescue_cover_image(gid, image_urls, gallery_dir)
+            await self._rescue_missing_images(gid, image_urls, gallery_dir)
             downloaded_count = self._downloaded_image_count(image_urls, gallery_dir)
             logger.info(f"[下载完成] {gid} ({downloaded_count}/{len(image_urls)}) - 开始分析")
             

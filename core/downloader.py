@@ -4,8 +4,9 @@ import asyncio
 from astrbot.api import logger
 
 class ImageDownloader:
-    def __init__(self, max_concurrency=20, proxy=None):
+    def __init__(self, max_concurrency=10, proxy=None):
         self.semaphore = asyncio.Semaphore(max_concurrency)
+        self.max_concurrency = max_concurrency
         self.proxy = proxy
         # 如果未传入，尝试从环境变量读取
         if not self.proxy:
