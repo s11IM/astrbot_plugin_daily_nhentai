@@ -7,7 +7,7 @@ __pycache__/
 # AstrBot Plugin cache
 cache/*
 !cache/.gitkeep
-tests/_downloads/
+
 
 # Large Model Files (Included for out-of-the-box experience)
 # models/*.pt
