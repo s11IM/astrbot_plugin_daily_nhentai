@@ -24,7 +24,7 @@
         "hint": "留空自动选择。cuda 为显卡，cpu 为处理器。"
     },
     "min_pages": {
-        "description": "每日热门：最少页数过滤",
+        "description": "列表模式：最少页数过滤",
         "type": "int",
         "default": 35,
         "slider": {
@@ -32,6 +32,17 @@
             "max": 100,
             "step": 1
         },
-        "hint": "每日热门榜单中，过滤掉少于此页数的本子。默认 35 页。"
+        "hint": "recent/today 列表模式会在下载前跳过少于此页数的本子。指定 ID 分析不受此下限影响。默认 35 页。"
+    },
+    "max_pages": {
+        "description": "最大页数过滤",
+        "type": "int",
+        "default": 300,
+        "slider": {
+            "min": 0,
+            "max": 500,
+            "step": 10
+        },
+        "hint": "超过此页数的本子会在下载前跳过，用于过滤合集；列表模式和指定 ID 分析都会生效。0 表示不限制。默认 300 页。"
     }
 }
