@@ -11,19 +11,27 @@ from .downloader import ImageDownloader
 from .analyzer import NSFWAnalyzer
 from .renderer import ResultRenderer
 
+
 class DailyManager:
     DAILY_RESULT_CACHE_TTL = 15 * 60
+    DAILY_SOURCE_LABELS = {
+        "recent": "中文最新列表",
+        "today": "今日中文热门",
+    }
 
     def __init__(self, context, config):
         self.context = context
         self.config = config
         self._lock = asyncio.Lock()  # 并发锁
-        
+
         # 从配置中获取参数
         proxy = config.get("proxy_url", "")
-        threshold = float(config.get("model_threshold", 0.08)) # Default to 0.08 as per docs
+        threshold = float(
+            config.get("model_threshold", 0.08)
+        )  # Default to 0.08 as per docs
         device = config.get("model_device", "")
         self.min_pages = int(config.get("min_pages", 35))
+        self.max_pages = int(config.get("max_pages", 300))
 
         self.crawler = NHCrawler(proxy=proxy)
         self.downloader = ImageDownloader(proxy=proxy)
@@ -31,8 +39,8 @@ class DailyManager:
         models_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "models")
         self.analyzer = NSFWAnalyzer(models_dir, threshold=threshold, device=device)
         self.renderer = ResultRenderer()
-        
-        # 启动时清理缓存 (简单清理)
+
+        # 启动时清理插件缓存。
         self._cleanup_cache()
 
     def _cleanup_cache(self):
@@ -55,12 +63,21 @@ class DailyManager:
         except Exception as e:
             logger.warning(f"缓存清理失败: {e}")
 
-    def get_recent_daily_result(self, max_age_seconds=None):
+    def _normalize_daily_source(self, source):
+        return source if source in self.DAILY_SOURCE_LABELS else "recent"
+
+    def _daily_result_path(self, source):
+        source = self._normalize_daily_source(source)
+        base_dir = os.path.dirname(os.path.dirname(__file__))
+        filename = f"nh_daily_{source}_result.jpg"
+        return os.path.join(base_dir, "cache", filename)
+
+    def get_cached_daily_result(self, source="recent", max_age_seconds=None):
         if max_age_seconds is None:
             max_age_seconds = self.DAILY_RESULT_CACHE_TTL
 
-        base_dir = os.path.dirname(os.path.dirname(__file__))
-        result_path = os.path.join(base_dir, "cache", "nh_daily_result.jpg")
+        source = self._normalize_daily_source(source)
+        result_path = self._daily_result_path(source)
 
         try:
             if not os.path.exists(result_path) or os.path.getsize(result_path) <= 0:
@@ -68,18 +85,25 @@ class DailyManager:
 
             age_seconds = time.time() - os.path.getmtime(result_path)
             if age_seconds <= max_age_seconds:
-                logger.info(f"命中每日总览缓存，直接复用: {result_path} ({int(age_seconds)}秒前生成)")
+                logger.info(
+                    f"命中{self.DAILY_SOURCE_LABELS[source]}缓存，直接复用: {result_path} ({int(age_seconds)}秒前生成)"
+                )
                 return result_path
         except Exception as e:
-            logger.debug(f"检查每日总览缓存失败: {e}")
+            logger.debug(f"检查{self.DAILY_SOURCE_LABELS[source]}缓存失败: {e}")
 
         return None
+
+    def get_recent_daily_result(self, max_age_seconds=None):
+        return self.get_cached_daily_result("recent", max_age_seconds)
 
     def _cleanup_send_variants(self, cache_dir, max_age_seconds=60 * 60):
         try:
             now = time.time()
             for filename in os.listdir(cache_dir):
-                if not filename.startswith("nh_daily_result_send_") or not filename.endswith(".jpg"):
+                if not filename.startswith(
+                    "nh_daily_result_send_"
+                ) or not filename.endswith(".jpg"):
                     continue
 
                 path = os.path.join(cache_dir, filename)
@@ -99,8 +123,7 @@ class DailyManager:
 
             nonce = uuid.uuid4().hex
             output_path = os.path.join(
-                cache_dir,
-                f"nh_daily_result_send_{int(time.time())}_{nonce[:8]}.jpg"
+                cache_dir, f"nh_daily_result_send_{int(time.time())}_{nonce[:8]}.jpg"
             )
 
             with PILImage.open(image_path) as img:
@@ -109,16 +132,18 @@ class DailyManager:
                     x, y = img.width - 1, img.height - 1
                     r, g, b = img.getpixel((x, y))
                     marker = int(nonce[:6], 16)
-                    img.putpixel((
-                        x,
-                        y
-                    ), (
-                        (r + 1 + marker % 3) % 256,
-                        (g + 1 + (marker // 3) % 3) % 256,
-                        (b + 1 + (marker // 9) % 3) % 256
-                    ))
+                    img.putpixel(
+                        (x, y),
+                        (
+                            (r + 1 + marker % 3) % 256,
+                            (g + 1 + (marker // 3) % 3) % 256,
+                            (b + 1 + (marker // 9) % 3) % 256,
+                        ),
+                    )
 
-                img.save(output_path, quality=95, comment=f"send-{nonce}".encode("ascii"))
+                img.save(
+                    output_path, quality=95, comment=f"send-{nonce}".encode("ascii")
+                )
 
             logger.info(f"已生成图片发送扰动副本: {output_path}")
             return output_path
@@ -129,7 +154,7 @@ class DailyManager:
     def _downloaded_image_count(self, image_urls, gallery_dir):
         count = 0
         for url in image_urls:
-            filename = url.split('/')[-1]
+            filename = url.split("/")[-1]
             image_path = os.path.join(gallery_dir, filename)
             if os.path.exists(image_path) and os.path.getsize(image_path) > 0:
                 count += 1
@@ -138,14 +163,14 @@ class DailyManager:
     def _missing_image_urls(self, image_urls, gallery_dir):
         missing_urls = []
         for url in image_urls:
-            filename = url.split('/')[-1]
+            filename = url.split("/")[-1]
             image_path = os.path.join(gallery_dir, filename)
             if not os.path.exists(image_path) or os.path.getsize(image_path) <= 0:
                 missing_urls.append(url)
         return missing_urls
 
     def _has_cover_image(self, gallery_dir):
-        for ext in ['jpg', 'png', 'webp', 'gif']:
+        for ext in ["jpg", "png", "webp", "gif"]:
             cover_path = os.path.join(gallery_dir, f"1.{ext}")
             if os.path.exists(cover_path) and os.path.getsize(cover_path) > 0:
                 return True
@@ -173,22 +198,29 @@ class DailyManager:
 
         logger.warning(f"[下载] {gid} 缺失 {len(missing_urls)} 张图片，开始低并发补救")
         await asyncio.sleep(3)
-        rescue_downloader = ImageDownloader(max_concurrency=3, proxy=self.downloader.proxy)
+        rescue_downloader = ImageDownloader(
+            max_concurrency=3, proxy=self.downloader.proxy
+        )
         await rescue_downloader.download_images(missing_urls, gallery_dir)
 
         remaining = self._missing_image_urls(image_urls, gallery_dir)
         rescued_count = len(missing_urls) - len(remaining)
-        logger.info(f"[下载] {gid} 缺页补救完成: 成功补回 {rescued_count}/{len(missing_urls)}")
+        logger.info(
+            f"[下载] {gid} 缺页补救完成: 成功补回 {rescued_count}/{len(missing_urls)}"
+        )
         if remaining:
             logger.warning(f"[下载] {gid} 仍缺失 {len(remaining)} 张图片")
         return rescued_count
 
-    async def process_daily_ranking(self, total_timeout=1200, analyze_timeout=300):
-        """处理每日热门排行榜
+    async def process_daily_ranking(
+        self, source="recent", total_timeout=1200, analyze_timeout=300
+    ):
+        """处理中文列表推荐。
 
         Args:
+            source: 列表来源，recent 为无后缀中文页，today 为今日热门排序。
             total_timeout: 整体流程超时时间（秒），默认20分钟
-            analyze_timeout: 单个本子分析超时时间（秒），默认5分钟
+            analyze_timeout: 列表中单个本子分析超时时间（秒），默认5分钟
 
         Returns:
             str: 生成的图片路径，失败返回None
@@ -197,7 +229,8 @@ class DailyManager:
             asyncio.TimeoutError: 整体流程超时
             Exception: 其他错误
         """
-        cached_result = self.get_recent_daily_result()
+        source = self._normalize_daily_source(source)
+        cached_result = self.get_cached_daily_result(source)
         if cached_result:
             return cached_result
 
@@ -206,14 +239,14 @@ class DailyManager:
 
         async with self._lock:
             try:
-                cached_result = self.get_recent_daily_result()
+                cached_result = self.get_cached_daily_result(source)
                 if cached_result:
                     return cached_result
 
                 # 使用整体超时控制
                 return await asyncio.wait_for(
-                    self._process_daily_ranking_internal(analyze_timeout),
-                    timeout=total_timeout
+                    self._process_daily_ranking_internal(source, analyze_timeout),
+                    timeout=total_timeout,
                 )
             except asyncio.TimeoutError:
                 logger.error(f"整体流程超时（{total_timeout}秒），强制中断")
@@ -222,13 +255,16 @@ class DailyManager:
                 logger.error(f"处理过程发生错误: {e}")
                 raise
 
-    async def _process_daily_ranking_internal(self, analyze_timeout):
+    async def _process_daily_ranking_internal(self, source, analyze_timeout):
         """内部处理函数"""
-        # 1. 获取今日中文热门列表
-        logger.info("开始获取今日中文热门列表...")
-        galleries = await self.crawler.get_popular_today(timeout=30)
+        # 1. 获取指定中文列表
+        source_label = self.DAILY_SOURCE_LABELS[self._normalize_daily_source(source)]
+        logger.info(f"开始获取{source_label}...")
+        galleries = await self.crawler.get_chinese_galleries(
+            source=source, timeout=30
+        )
         if not galleries:
-            logger.warning("未能获取到热门列表。")
+            logger.warning(f"未能获取到{source_label}。")
             return None
 
         # 使用插件目录下的 cache 文件夹
@@ -244,8 +280,8 @@ class DailyManager:
         analyze_queue = asyncio.Queue()
         analyzed_galleries = []
         failed_galleries = []  # 记录失败的本子
-        skipped_galleries = [] # 记录跳过的本子
-        
+        skipped_galleries = []  # 记录跳过的本子
+
         # 将任务放入下载队列
         for gallery in galleries:
             await download_queue.put(gallery)
@@ -258,7 +294,7 @@ class DailyManager:
                 except asyncio.QueueEmpty:
                     break
 
-                gid = gallery['id']
+                gid = gallery["id"]
                 logger.debug(f"[下载] 开始处理 ID: {gid}")
 
                 gallery_dir = os.path.join(cache_dir, str(gid))
@@ -266,22 +302,34 @@ class DailyManager:
                     # 获取图片链接（带超时，增加重试机制）
                     image_urls = []
                     metadata = {}
-                    
+
                     is_filtered = False
-                    
-                    for retry in range(2): # 尝试 2 次
+
+                    for retry in range(2):  # 尝试 2 次
                         try:
-                            result = await self.crawler.get_gallery_images(gid, timeout=30, min_pages=self.min_pages)
+                            result = await self.crawler.get_gallery_images(
+                                gid,
+                                timeout=30,
+                                min_pages=self.min_pages,
+                                max_pages=self.max_pages,
+                            )
                             if result is None:
-                                logger.debug(f"[下载] {gid} 被过滤（如页数不足 {self.min_pages}），跳过")
+                                filter_desc = f"少于 {self.min_pages} 页"
+                                if self.max_pages:
+                                    filter_desc += f"或超过 {self.max_pages} 页"
+                                logger.debug(
+                                    f"[下载] {gid} 被过滤（{filter_desc}），跳过"
+                                )
                                 is_filtered = True
                                 break
-                                
+
                             image_urls, metadata = result
                             if image_urls:
                                 break
                         except Exception as e:
-                            logger.debug(f"[下载] {gid} 获取链接出错: {e}，重试 {retry+1}/2...")
+                            logger.debug(
+                                f"[下载] {gid} 获取链接出错: {e}，重试 {retry + 1}/2..."
+                            )
                             if retry < 1:
                                 await asyncio.sleep(2)
 
@@ -293,7 +341,7 @@ class DailyManager:
                         logger.warning(f"[下载] 无法获取 {gid} 的图片链接 (已重试2次)")
                         failed_galleries.append(gid)
                         continue
-                    
+
                     # 更新元数据（如 tags）
                     if metadata:
                         gallery.update(metadata)
@@ -302,12 +350,16 @@ class DailyManager:
                     await self.downloader.download_images(image_urls, gallery_dir)
                     await self._rescue_cover_image(gid, image_urls, gallery_dir)
                     await self._rescue_missing_images(gid, image_urls, gallery_dir)
-                    downloaded_count = self._downloaded_image_count(image_urls, gallery_dir)
+                    downloaded_count = self._downloaded_image_count(
+                        image_urls, gallery_dir
+                    )
 
                     # 放入分析队列
-                    gallery['gallery_dir'] = gallery_dir
+                    gallery["gallery_dir"] = gallery_dir
                     await analyze_queue.put(gallery)
-                    logger.info(f"[下载完成] {gid} ({downloaded_count}/{len(image_urls)}) - 已加入分析队列")
+                    logger.info(
+                        f"[下载完成] {gid} ({downloaded_count}/{len(image_urls)}) - 已加入分析队列"
+                    )
 
                 except asyncio.TimeoutError:
                     logger.warning(f"[下载] 处理 {gid} 超时")
@@ -326,55 +378,61 @@ class DailyManager:
                 except asyncio.CancelledError:
                     break
 
-                gid = gallery['id']
-                gallery_dir = gallery.get('gallery_dir')
-                logger.debug(f"[分析] 正在分析: {gid} - {gallery.get('title', 'Unknown')[:30]}...")
+                gid = gallery["id"]
+                gallery_dir = gallery.get("gallery_dir")
+                logger.debug(
+                    f"[分析] 正在分析: {gid} - {gallery.get('title', 'Unknown')[:30]}..."
+                )
 
                 stop_event = threading.Event()
                 try:
                     # 分析（带超时控制，传入stop_event）
                     score, nsfw_stats = await asyncio.wait_for(
-                        asyncio.to_thread(self.analyzer.analyze_folder, gallery_dir, stop_event),
-                        timeout=analyze_timeout
+                        asyncio.to_thread(
+                            self.analyzer.analyze_folder, gallery_dir, stop_event
+                        ),
+                        timeout=analyze_timeout,
                     )
 
-                    gallery['score'] = score
-                    gallery['stats'] = nsfw_stats
+                    gallery["score"] = score
+                    gallery["stats"] = nsfw_stats
 
                     # 提取封面 (支持多种格式)
                     cover_found = False
-                    for ext in ['jpg', 'png', 'webp', 'gif']:
+                    for ext in ["jpg", "png", "webp", "gif"]:
                         cover_path = os.path.join(gallery_dir, f"1.{ext}")
                         if os.path.exists(cover_path):
-                             saved_cover = os.path.join(cache_dir, f"cover_{gid}.{ext}")
-                             
-                             # 确保目标文件不存在，防止 move 失败
-                             if os.path.exists(saved_cover):
-                                 try:
-                                     os.remove(saved_cover)
-                                 except Exception as e:
-                                     logger.warning(f"删除旧封面失败: {e}")
+                            saved_cover = os.path.join(cache_dir, f"cover_{gid}.{ext}")
 
-                             try:
-                                 shutil.move(cover_path, saved_cover)
-                                 gallery['local_cover'] = saved_cover
-                                 cover_found = True
-                             except Exception as e:
-                                 logger.error(f"移动封面失败 {gid}: {e}")
-                             
-                             break
-                    
+                            # 确保目标文件不存在，防止 move 失败
+                            if os.path.exists(saved_cover):
+                                try:
+                                    os.remove(saved_cover)
+                                except Exception as e:
+                                    logger.warning(f"删除旧封面失败: {e}")
+
+                            try:
+                                shutil.move(cover_path, saved_cover)
+                                gallery["local_cover"] = saved_cover
+                                cover_found = True
+                            except Exception as e:
+                                logger.error(f"移动封面失败 {gid}: {e}")
+
+                            break
+
                     if not cover_found:
                         logger.warning(f"[分析] {gid} 未找到封面图片")
 
                     analyzed_galleries.append(gallery)
                     # 提升为 INFO 级别，方便用户了解进度
-                    title_snippet = gallery.get('title', 'Unknown')[:20]
-                    logger.info(f"[分析完成] ID:{gid} 得分:{score:.2f} 标题:{title_snippet}...")
+                    title_snippet = gallery.get("title", "Unknown")[:20]
+                    logger.info(
+                        f"[分析完成] ID:{gid} 得分:{score:.2f} 标题:{title_snippet}..."
+                    )
 
                 except asyncio.TimeoutError:
                     logger.warning(f"[分析] 分析 {gid} 超时（{analyze_timeout}秒）")
-                    stop_event.set() # 触发停止信号
+                    stop_event.set()  # 触发停止信号
                     failed_galleries.append(gid)
                 except Exception as e:
                     logger.error(f"[分析] 出错 {gid}: {e}")
@@ -409,7 +467,9 @@ class DailyManager:
         await asyncio.gather(*download_workers, return_exceptions=True)
 
         # 检查结果
-        logger.info(f"处理完成: 成功 {len(analyzed_galleries)} 个, 跳过 {len(skipped_galleries)} 个, 失败 {len(failed_galleries)} 个")
+        logger.info(
+            f"处理完成: 成功 {len(analyzed_galleries)} 个, 跳过 {len(skipped_galleries)} 个, 失败 {len(failed_galleries)} 个"
+        )
 
         if not analyzed_galleries:
             logger.warning("没有成功分析任何本子")
@@ -417,22 +477,22 @@ class DailyManager:
 
         # 排序与生成结果
         logger.info("生成结果卡片...")
-        analyzed_galleries.sort(key=lambda x: x.get('score', 0), reverse=True)
-        top_n = analyzed_galleries[:10] # 保留前10个
+        analyzed_galleries.sort(key=lambda x: x.get("score", 0), reverse=True)
+        top_n = analyzed_galleries[:10]  # 保留前10个
 
-        # 检查是否有足够的本子生成卡片
+        # 检查是否有结果可生成卡片。
         if len(top_n) == 0:
             logger.warning("没有足够的本子生成结果卡片")
             return None
 
-        output_path = os.path.join(cache_dir, "nh_daily_result.jpg")
+        output_path = self._daily_result_path(source)
         final_card = self.renderer.render_card(top_n, output_path)
 
         # 清理封面图
         for g in analyzed_galleries:  # 清理所有封面临时文件
-            if 'local_cover' in g and os.path.exists(g['local_cover']):
+            if "local_cover" in g and os.path.exists(g["local_cover"]):
                 try:
-                    os.remove(g['local_cover'])
+                    os.remove(g["local_cover"])
                 except Exception as e:
                     logger.debug(f"清理封面失败 {g['local_cover']}: {e}")
 
@@ -441,82 +501,93 @@ class DailyManager:
     async def process_single_gallery(self, gid):
         """处理单个本子"""
         logger.info(f"开始处理单个本子: {gid}")
-        
+
         base_dir = os.path.dirname(os.path.dirname(__file__))
         cache_dir = os.path.join(base_dir, "cache")
         if not os.path.exists(cache_dir):
             os.makedirs(cache_dir)
-            
+
         gallery_dir = os.path.join(cache_dir, str(gid))
-        
+
         try:
             # 1. 获取信息 (带重试)
             result = None
             for retry in range(2):
                 try:
-                    # 单本子指定分析，不应进行页数过滤，传入 min_pages=0
-                    result = await self.crawler.get_gallery_images(gid, min_pages=0)
+                    # 指定 ID 不做最少页数过滤，但仍跳过超大合集。
+                    result = await self.crawler.get_gallery_images(
+                        gid, min_pages=0, max_pages=self.max_pages
+                    )
                     if result:
                         break
                 except Exception as e:
-                    logger.debug(f"获取本子信息失败 {gid}: {e} (重试 {retry+1}/2)")
+                    logger.debug(f"获取本子信息失败 {gid}: {e} (重试 {retry + 1}/2)")
                     if retry < 1:
                         await asyncio.sleep(2)
-            
+
             if not result:
                 logger.warning(f"无法获取本子信息 {gid} (已重试2次)")
                 return None
-                
+
             image_urls, metadata = result
-            
+
             # 构造 gallery 对象
             gallery = {
-                'id': gid,
-                'title': metadata.get('title', f"Gallery {gid}"),
-                'tags': metadata.get('tags', []),
-                'gallery_dir': gallery_dir
+                "id": gid,
+                "title": metadata.get("title", f"Gallery {gid}"),
+                "page_count": metadata.get("page_count", len(image_urls)),
+                "tags": metadata.get("tags", []),
+                "gallery_dir": gallery_dir,
             }
-            
+
             # 2. 下载图片
             await self.downloader.download_images(image_urls, gallery_dir)
             await self._rescue_cover_image(gid, image_urls, gallery_dir)
             await self._rescue_missing_images(gid, image_urls, gallery_dir)
             downloaded_count = self._downloaded_image_count(image_urls, gallery_dir)
-            logger.info(f"[下载完成] {gid} ({downloaded_count}/{len(image_urls)}) - 开始分析")
-            
+            logger.info(
+                f"[下载完成] {gid} ({downloaded_count}/{len(image_urls)}) - 开始分析"
+            )
+
             # 3. 分析
             stop_event = threading.Event()
-            score, nsfw_stats = await asyncio.to_thread(self.analyzer.analyze_folder, gallery_dir, stop_event)
-            gallery['score'] = score
-            gallery['stats'] = nsfw_stats
-            
+            score, nsfw_stats = await asyncio.to_thread(
+                self.analyzer.analyze_folder, gallery_dir, stop_event
+            )
+            gallery["score"] = score
+            gallery["stats"] = nsfw_stats
+
             # 4. 提取封面
             cover_found = False
-            for ext in ['jpg', 'png', 'webp', 'gif']:
+            for ext in ["jpg", "png", "webp", "gif"]:
                 cover_path = os.path.join(gallery_dir, f"1.{ext}")
                 if os.path.exists(cover_path):
-                     saved_cover = os.path.join(cache_dir, f"cover_{gid}.{ext}")
-                     if os.path.exists(saved_cover):
-                         try: os.remove(saved_cover)
-                         except: pass
-                     
-                     shutil.move(cover_path, saved_cover)
-                     gallery['local_cover'] = saved_cover
-                     cover_found = True
-                     break
-            
+                    saved_cover = os.path.join(cache_dir, f"cover_{gid}.{ext}")
+                    if os.path.exists(saved_cover):
+                        try:
+                            os.remove(saved_cover)
+                        except:
+                            pass
+
+                    shutil.move(cover_path, saved_cover)
+                    gallery["local_cover"] = saved_cover
+                    cover_found = True
+                    break
+
             # 5. 生成卡片
             output_path = os.path.join(cache_dir, f"nh_{gid}.jpg")
             # render_card 接收列表，我们传入单个元素的列表
             final_card = self.renderer.render_card([gallery], output_path)
-            
+
             # 清理封面
             if cover_found:
-                try: os.remove(gallery['local_cover'])
-                except: pass
-                
+                try:
+                    os.remove(gallery["local_cover"])
+                except:
+                    pass
+
             return final_card
-            
+
         except Exception as e:
             logger.error(f"处理单个本子出错 {gid}: {e}")
             return None

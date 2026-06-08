@@ -42,26 +42,49 @@ class NHCrawler:
                 return ".jpg" if ext == ".jpeg" else ext
         return ".jpg"
 
-    def _extract_json_tags(self, gallery_data):
-        """从 window._gallery 数据中提取可展示标签，过滤页数等统计项。"""
-        excluded_types = {
+    def _normalize_tag_group_name(self, text):
+        text = re.sub(r"\s+", " ", text or "").strip().lower()
+        if ":" in text:
+            text = text.split(":", 1)[0]
+        return text.rstrip(":").strip()
+
+    def _is_excluded_tag_group(self, group_name):
+        excluded_groups = {
             "language",
+            "languages",
             "category",
+            "categories",
             "translated",
             "page",
             "pages",
             "uploaded",
         }
+        return self._normalize_tag_group_name(group_name) in excluded_groups
+
+    def _is_display_tag_name(self, name):
+        normalized = re.sub(r"\s+", " ", name or "").strip().lower()
+        if not normalized:
+            return False
+
+        # nhentai renders "Pages" values with the same a.tag/span.name shape as
+        # normal tags, so filter page-count chips even if group detection fails.
+        if re.fullmatch(r"\d+(?:\s*pages?)?", normalized):
+            return False
+
+        return True
+
+    def _extract_json_tags(self, gallery_data):
+        """从 window._gallery 数据中提取可展示标签，过滤页数等统计项。"""
         tags = []
         seen = set()
 
         for tag_data in gallery_data.get("tags", []):
             tag_type = str(tag_data.get("type", "")).strip().lower()
-            if tag_type in excluded_types:
+            if self._is_excluded_tag_group(tag_type):
                 continue
 
             name = str(tag_data.get("name", "")).strip()
-            if not name:
+            if not self._is_display_tag_name(name):
                 continue
 
             normalized = name.lower()
@@ -79,15 +102,6 @@ class NHCrawler:
         if not tags_section:
             return []
 
-        excluded_groups = {
-            "languages",
-            "language",
-            "categories",
-            "category",
-            "pages",
-            "page",
-            "uploaded",
-        }
         tags = []
         seen = set()
 
@@ -98,13 +112,16 @@ class NHCrawler:
                 and "field-name" in tag.get("class", [])
             )
             if previous_label and tags_section in previous_label.parents:
-                group_name = previous_label.get_text(" ", strip=True).rstrip(":").lower()
+                group_name = self._normalize_tag_group_name(
+                    previous_label.get_text(" ", strip=True)
+                )
 
             if not group_name:
-                group_text = tag_container.get_text(" ", strip=True).lower()
-                group_name = group_text.split(":", 1)[0].strip() if group_text else ""
+                group_name = self._normalize_tag_group_name(
+                    tag_container.get_text(" ", strip=True)
+                )
 
-            if group_name in excluded_groups:
+            if self._is_excluded_tag_group(group_name):
                 continue
 
             for tag_link in tag_container.find_all("a", class_="tag"):
@@ -113,7 +130,7 @@ class NHCrawler:
                     continue
 
                 name = name_span.text.strip()
-                if not name:
+                if not self._is_display_tag_name(name):
                     continue
 
                 normalized = name.lower()
@@ -167,16 +184,23 @@ class NHCrawler:
 
         return results
 
-    async def get_popular_today(self, timeout=30):
+    def _chinese_listing_url(self, source):
+        if source == "today":
+            return f"{self.base_url}/language/chinese/?sort=popular-today"
+
+        return f"{self.base_url}/language/chinese/"
+
+    async def get_chinese_galleries(self, source="recent", timeout=30):
         """获取中文分类页列表
 
         Args:
+            source: recent 为无后缀中文页，today 为今日热门排序
             timeout: 请求超时时间（秒）
 
         Returns:
             List[Dict]: 本子列表，超时或出错返回空列表
         """
-        target_url = f"{self.base_url}/language/chinese/"
+        target_url = self._chinese_listing_url(source)
         logger.debug(f"正在爬取: {target_url}")
 
         try:
@@ -207,17 +231,36 @@ class NHCrawler:
             logger.error(f"爬取列表出错: {e}")
             return []
 
-    async def get_gallery_images(self, gid, timeout=30, min_pages=35):
+    async def get_popular_today(self, timeout=30):
+        return await self.get_chinese_galleries(source="today", timeout=timeout)
+
+    def _is_page_count_filtered(self, page_count, min_pages, max_pages, source_label):
+        if min_pages and page_count < min_pages:
+            logger.debug(
+                f"本子页数过少 ({page_count} < {min_pages})，跳过 ({source_label})。"
+            )
+            return True
+
+        if max_pages and page_count > max_pages:
+            logger.debug(
+                f"本子页数过多 ({page_count} > {max_pages})，跳过 ({source_label})。"
+            )
+            return True
+
+        return False
+
+    async def get_gallery_images(self, gid, timeout=30, min_pages=35, max_pages=300):
         """获取本子图片列表和信息
 
         Args:
             gid: 本子ID
             timeout: 请求超时时间（秒）
             min_pages: 最小页数限制，少于此页数将返回 None (默认 35)
+            max_pages: 最大页数限制，大于此页数将返回 None；0 表示不限制 (默认 300)
 
         Returns:
             Tuple[List[str], Dict]: (图片URL列表, 元数据字典)
-            None: 如果本子被过滤（如页数过少）
+            None: 如果本子被过滤（如页数过少或过多）
 
         Raises:
             Exception: 网络错误或其他异常，调用者应捕获并决定是否重试
@@ -253,8 +296,9 @@ class NHCrawler:
 
                 images = gallery_data.get("images", {}).get("pages", [])
 
-                if len(images) < min_pages:
-                    logger.debug(f"本子页数过少 ({len(images)} < {min_pages})，跳过。")
+                if self._is_page_count_filtered(
+                    len(images), min_pages, max_pages, "JSON解析"
+                ):
                     return None  # 返回 None 表示被过滤，无需重试
 
                 image_urls = []
@@ -281,6 +325,7 @@ class NHCrawler:
                 metadata = {
                     "title": gallery_data.get("title", {}).get("pretty")
                     or gallery_data.get("title", {}).get("english"),
+                    "page_count": len(images),
                     "tags": tags,
                 }
 
@@ -308,10 +353,9 @@ class NHCrawler:
 
         thumbs = soup.find_all("div", class_="thumb-container")
 
-        if len(thumbs) < min_pages:
-            logger.debug(
-                f"本子页数过少 ({len(thumbs)} < {min_pages})，跳过 (HTML解析)。"
-            )
+        if self._is_page_count_filtered(
+            len(thumbs), min_pages, max_pages, "HTML解析"
+        ):
             return None
 
         image_urls = []
@@ -327,6 +371,6 @@ class NHCrawler:
         # HTML 提取 tags。nhentai 会把 Pages/Uploaded 也做成 tag 样式，必须按分组过滤。
         tags = self._extract_html_tags(soup)
 
-        metadata = {"tags": tags}
+        metadata = {"page_count": len(thumbs), "tags": tags}
 
         return image_urls, metadata
