@@ -1,4 +1,4 @@
-# AstrBot Nhentai 本子检测、排行
+# nhentai 本子检测、排行
 
 这个插件会通过命令获取 nhentai 的中文最新列表或今日热门列表，下载候选本子后使用本地 YOLO NSFW 模型进行评分，并生成推荐卡片。
 
